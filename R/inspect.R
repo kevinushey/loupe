@@ -48,10 +48,23 @@ loupe_inspect_gdb <- function(pid) {
    # generate script to be run
    data <- loupe_inspect_init(pid)
 
-   # tell lldb to run and source the generated R script
-   fmt <- "call Rf_eval(Rf_lang2(Rf_install(\"sys.source\"), Rf_mkString(\"%s\")), R_BaseEnv)"
-   expr <- sprintf(fmt, data$rscript)
-   args <- c("-p", pid, "-batch", "-ex", shQuote(expr))
+   # tell gdb to run and source the generated R script.
+   # TODO: why do I need to explicitly de-reference things here?
+   # TODO: why doesn't GDB support double-quoted strings?
+   # TODO: segfaults on second attempt
+   template <- "attach {PID}
+call *Rf_protect(*Rf_eval(*Rf_protect(*Rf_lang2(*Rf_install('sys.source'), *Rf_protect(*Rf_mkString('{SCRIPT}')))), *R_BaseEnv))
+call *Rf_unprotect(2)
+quit"
+
+   template <- gsub("{PID}", pid, template, fixed = TRUE)
+   template <- gsub("{SCRIPT}", data$rscript, template, fixed = TRUE)
+   gdbcode <- template
+
+   gdbscript <- tempfile("loupe-gdb-", fileext = ".gdb")
+   writeLines(gdbcode, con = gdbscript)
+   args <- c("-batch", "-x", shQuote(gdbscript))
+   writeLines(gdbcode)
 
    # run lldb
    cat("Attaching to process '", pid, "' ... ", sep = "")
@@ -61,6 +74,7 @@ loupe_inspect_gdb <- function(pid) {
    # check for generated output
    if (!file.exists(data$output)) {
       warning("debugger failed to return any output")
+      print(output)
       return(NULL)
    }
 
@@ -123,15 +137,11 @@ loupe_inspect_init <- function(pid) {
 
       local({
 
-         # retrieve calls
-         calls <- if ("rlang" %in% loadedNamespaces()) {
-            rlang::trace_back()
-         } else {
-            sys.calls()
+         # if rlang is available, use it to write calls
+         if (requireNamespace("rlang", quietly = TRUE)) {
+            calls <- rlang::trace_back()
+            writeLines(format(calls), con = output)
          }
-
-         # write stack to file
-         writeLines(format(calls), con = output)
 
          # read frames
          status <- sys.status()
