@@ -92,51 +92,57 @@ cat > "${R_SCRIPT_PATH}" <<- EOF
 
 # print rlang traceback if available
 if (requireNamespace("rlang", quietly = TRUE)) {
-	traceback <- format(rlang::trace_back())
-	writeLines(traceback, con = "${R_TRACEBACK_PATH}")
+	frames <- sys.frames()
+	if (length(frames) > 3L) {
+		bottom <- frames[[length(frames) - 3L]]
+		traceback <- format(rlang::trace_back(0, bottom))
+		writeLines(traceback, con = "${R_TRACEBACK_PATH}")
+	}
 }
 
 # dump frames to file
+status <- sys.status()
 saveRDS(sys.status(), file = "${R_FRAMES_PATH}", version = 2L)
 
 EOF
 
 run-lldb () {
 
-	# write lldb script
+	# write script
 	SCRIPT_PATH=$(mktemp)
 	cat > "${SCRIPT_PATH}" <<- EOF
-
-	# create a new R environment
-	expr SEXP \$call = Rf_protect(Rf_lang1(Rf_install("new.env")))
-	expr SEXP \$envir = Rf_protect(Rf_eval(\$call, R_BaseEnv))
-	
-	# evaluate script in that environment
-	expr SEXP \$script = Rf_protect(Rf_mkString("${R_SCRIPT_PATH}"))
-	expr SEXP \$source = Rf_protect(Rf_lang3(Rf_install("sys.source"), \$script, \$envir))
-	expr Rf_eval(\$source, R_BaseEnv)
-	
-	# clean up
-	expr Rf_unprotect(4)
+	call Rf_eval(Rf_lang3(Rf_install("sys.source"), Rf_mkString("${R_SCRIPT_PATH}"), R_GlobalEnv), R_GlobalEnv)
 	EOF
 
 	printf "%s" "Attaching debugger ... "
-	lldb --batch --attach-pid "${PID}" --source "${SCRIPT_PATH}" > /dev/null
+	"${LOUPE_DEBUGGER}" --batch --attach-pid "${PID}" --source "${SCRIPT_PATH}" > /dev/null
 	STATUS="$?"
 	if [ "${STATUS}" != "0" ]; then
-		echo "ERROR: lldb had status code ${STATUS}"
+		echo "ERROR: ${LOUPE_DEBUGGER} had status code ${STATUS}"
 		exit 1
 	fi
 
-	# check for output
 	printf "%s\n" "Done!"
 	
 }
 
 run-gdb () {
 
-	# TODO
-	true
+	# write script
+	SCRIPT_PATH=$(mktemp)
+	cat > "${SCRIPT_PATH}" <<- EOF
+	call Rf_eval(Rf_lang3(Rf_install("sys.source"), Rf_mkString("${R_SCRIPT_PATH}"), Rf_lang1(Rf_install("new.env"))), R_GlobalEnv)
+	EOF
+
+	printf "%s" "Attaching debugger ... "
+	"${LOUPE_DEBUGGER}" -batch -p "${PID}" -x "${SCRIPT_PATH}"
+	STATUS="$?"
+	if [ "${STATUS}" != "0" ]; then
+		echo "ERROR: ${LOUPE_DEBUGGER} had status code ${STATUS}"
+		exit 1
+	fi
+
+	printf "%s\n" "Done!"
 
 }
 
