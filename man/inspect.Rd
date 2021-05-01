@@ -4,14 +4,17 @@
 \alias{inspect}
 \title{Inspect a Running R Process}
 \usage{
-inspect(pid = NULL)
+inspect(pid = NULL, debugger = NULL)
 }
 \arguments{
-\item{pid}{The \R process PID. When passed a string, `loupe` will attempt to
+\item{pid}{The \R process ID. When passed a string, `loupe` will attempt to
 find the most recently launched \R process with the command matching the
 requested string. You can also pass the name of a process embedding \R
 to attach to that process; e.g. use `"rsession"` to attach to the
 most recently launched RStudio `rsession` process.}
+
+\item{debugger}{The path to a debugger. When unset, loupe will use the
+debugger found on the `PATH` (`lldb` on macOS; `gdb` otherwise).}
 }
 \description{
 Inspect a Running R Process

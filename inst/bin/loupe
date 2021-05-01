@@ -91,7 +91,7 @@ R_SCRIPT_PATH="$(mktemp).R"
 cat > "${R_SCRIPT_PATH}" <<- EOF
 
 # print rlang traceback if available
-if (requireNamespace("rlang", quietly = TRUE)) {
+if ("rlang" %in% loadedNamespaces()) {
 	frames <- sys.frames()
 	if (length(frames) > 3L) {
 		bottom <- frames[[length(frames) - 3L]]
@@ -135,13 +135,17 @@ run-gdb () {
 	EOF
 
 	printf "%s" "Attaching debugger ... "
-	"${LOUPE_DEBUGGER}" -batch -p "${PID}" -x "${SCRIPT_PATH}"
+	
+	LOUPE_DEBUGGER_OUTPUT=$(mktemp)
+	"${LOUPE_DEBUGGER}" -batch -p "${PID}" -x "${SCRIPT_PATH}" &> "${LOUPE_DEBUGGER_OUTPUT}"
 	STATUS="$?"
 	if [ "${STATUS}" != "0" ]; then
+		cat "${LOUPE_DEBUGGER_OUTPUT}"
 		echo "ERROR: ${LOUPE_DEBUGGER} had status code ${STATUS}"
 		exit 1
 	fi
 
+	rm -f -- "${LOUPE_DEBUGGER_OUTPUT}"
 	printf "%s\n" "Done!"
 
 }
