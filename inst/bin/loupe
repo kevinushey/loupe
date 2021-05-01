@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+
+set +H
+
+read -r -d '' USAGE <<- EOF
+Usage: $(basename "$0") pid
+
+Use a debugger to attach to an R process, and print the R call stack.
+
+Options:
+
+  -d    Specify the path to the debugger to be used.
+  -e    Run an R expression in the requested process.
+  -f    Run an R script in the requested process.
+
+EOF
+
+if [ "$#" = "0" ] || [ "$1" = "--help" ]; then
+	printf "%s\n\n" "${USAGE}"
+	exit 0
+fi
+
+while [ "$#" != "0" ]; do
+
+	case "$1" in
+	
+	-d)
+		LOUPE_DEBUGGER="$2"
+		shift
+	;;
+
+	-e)
+		LOUPE_R_EXPRESSION="$2"
+		shift
+	;;
+
+	-f)
+		LOUPE_R_FILE="$2"
+		shift
+	;;
+
+	*)
+		PID="$1"
+		shift
+	;;
+
+	esac
+
+	shift
+
+done
+
+# figure out debugger to be used
+if [ -z "${LOUPE_DEBUGGER}" ]; then
+	if [ "$(uname)" = "Darwin" ]; then
+		LOUPE_DEBUGGER=lldb
+	else
+		LOUPE_DEBUGGER=gdb
+	fi
+fi
+
+if ! command -v "${LOUPE_DEBUGGER}" &> /dev/null; then
+	echo "error: requested debugger '${LOUPE_DEBUGGER}' does not exist"
+	exit 1
+fi
+
+# if we've been supplied the name of a process,
+# rather than a process id, then try to resolve it
+if ! [ "${PID}" -eq "${PID}" ] 2> /dev/null; then
+	
+	_PID="$(pgrep -nx "${PID}")"
+
+	if [ -z "${_PID}" ]; then
+		echo "error: could not resolve PID for process '${PID}'"
+		exit 1
+	fi
+
+	PID="${_PID}"
+
+fi
+
+# TODO: we could consider hooking lldb up to an input / output
+# socket and keeping lldb and its connection alive for longer
+
+# path for R outputs
+R_TRACEBACK_PATH="$(mktemp).log"
+R_FRAMES_PATH="$(mktemp).rds"
+
+# write R script
+R_SCRIPT_PATH="$(mktemp).R"
+cat > "${R_SCRIPT_PATH}" <<- EOF
+
+# print rlang traceback if available
+if (requireNamespace("rlang", quietly = TRUE)) {
+	traceback <- format(rlang::trace_back())
+	writeLines(traceback, con = "${R_TRACEBACK_PATH}")
+}
+
+# dump frames to file
+saveRDS(sys.status(), file = "${R_FRAMES_PATH}", version = 2L)
+
+EOF
+
+run-lldb () {
+
+	# write lldb script
+	SCRIPT_PATH=$(mktemp)
+	cat > "${SCRIPT_PATH}" <<- EOF
+
+	# create a new R environment
+	expr SEXP \$call = Rf_protect(Rf_lang1(Rf_install("new.env")))
+	expr SEXP \$envir = Rf_protect(Rf_eval(\$call, R_BaseEnv))
+	
+	# evaluate script in that environment
+	expr SEXP \$script = Rf_protect(Rf_mkString("${R_SCRIPT_PATH}"))
+	expr SEXP \$source = Rf_protect(Rf_lang3(Rf_install("sys.source"), \$script, \$envir))
+	expr Rf_eval(\$source, R_BaseEnv)
+	
+	# clean up
+	expr Rf_unprotect(4)
+	EOF
+
+	printf "%s" "Attaching debugger ... "
+	lldb --batch --attach-pid "${PID}" --source "${SCRIPT_PATH}" > /dev/null
+	STATUS="$?"
+	if [ "${STATUS}" != "0" ]; then
+		echo "ERROR: lldb had status code ${STATUS}"
+		exit 1
+	fi
+
+	# check for output
+	printf "%s\n" "Done!"
+	
+}
+
+run-gdb () {
+
+	# TODO
+	true
+
+}
+
+case "${LOUPE_DEBUGGER}" in
+*gdb)  run-gdb  ;;
+*lldb) run-lldb ;;
+esac
+
+if [ -f "${R_TRACEBACK_PATH}" ]; then
+	echo ""
+	echo -e "\033[1m\033[34m==>\033[0m \033[1mTraceback (most recent calls last)\033[0m"
+	cat "${R_TRACEBACK_PATH}"
+	echo ""
+fi
+
+if [ -f "${R_FRAMES_PATH}" ]; then
+	echo "R frames dumped to '${R_FRAMES_PATH}'."
+fi
+
