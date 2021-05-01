@@ -23,7 +23,7 @@ fi
 while [ "$#" != "0" ]; do
 
 	case "$1" in
-	
+
 	-d)
 		LOUPE_DEBUGGER="$2"
 		shift
@@ -67,7 +67,7 @@ fi
 # if we've been supplied the name of a process,
 # rather than a process id, then try to resolve it
 if ! [ "${PID}" -eq "${PID}" ] 2> /dev/null; then
-	
+
 	_PID="$(pgrep -nx "${PID}")"
 
 	if [ -z "${_PID}" ]; then
@@ -108,12 +108,6 @@ EOF
 
 run-lldb () {
 
-	# write script
-	SCRIPT_PATH=$(mktemp)
-	cat > "${SCRIPT_PATH}" <<- EOF
-	call Rf_eval(Rf_lang3(Rf_install("sys.source"), Rf_mkString("${R_SCRIPT_PATH}"), R_GlobalEnv), R_GlobalEnv)
-	EOF
-
 	printf "%s" "Attaching debugger ... "
 	"${LOUPE_DEBUGGER}" --batch --attach-pid "${PID}" --source "${SCRIPT_PATH}" > /dev/null
 	STATUS="$?"
@@ -123,19 +117,13 @@ run-lldb () {
 	fi
 
 	printf "%s\n" "Done!"
-	
+
 }
 
 run-gdb () {
 
-	# write script
-	SCRIPT_PATH=$(mktemp)
-	cat > "${SCRIPT_PATH}" <<- EOF
-	call Rf_eval(Rf_lang3(Rf_install("sys.source"), Rf_mkString("${R_SCRIPT_PATH}"), Rf_lang1(Rf_install("new.env"))), R_GlobalEnv)
-	EOF
-
 	printf "%s" "Attaching debugger ... "
-	
+
 	LOUPE_DEBUGGER_OUTPUT=$(mktemp)
 	"${LOUPE_DEBUGGER}" -batch -p "${PID}" -x "${SCRIPT_PATH}" &> "${LOUPE_DEBUGGER_OUTPUT}"
 	STATUS="$?"
@@ -149,6 +137,12 @@ run-gdb () {
 	printf "%s\n" "Done!"
 
 }
+
+# write script
+SCRIPT_PATH=$(mktemp)
+cat > "${SCRIPT_PATH}" <<- EOF
+call Rf_eval(Rf_lang3(Rf_install("sys.source"), Rf_mkString("${R_SCRIPT_PATH}"), Rf_lang1(Rf_install("new.env"))), R_GlobalEnv)
+EOF
 
 case "${LOUPE_DEBUGGER}" in
 *gdb)  run-gdb  ;;
