@@ -12,6 +12,7 @@ Options:
   -d    Specify the path to the debugger to be used.
   -e    Run an R expression in the requested process.
   -f    Run an R script in the requested process.
+  -o    The file where R frames should be saved.
 
 EOF
 
@@ -19,6 +20,10 @@ if [ "$#" = "0" ] || [ "$1" = "--help" ]; then
 	printf "%s\n\n" "${USAGE}"
 	exit 0
 fi
+
+realpath () {
+	echo "$(cd "$(dirname "$1")"; pwd -P)/$(basename "$1")"
+}
 
 while [ "$#" != "0" ]; do
 
@@ -36,6 +41,11 @@ while [ "$#" != "0" ]; do
 
 	-f)
 		LOUPE_R_FILE="$2"
+		shift
+	;;
+
+	-o)
+		R_FRAMES_PATH=$(realpath "$2")
 		shift
 	;;
 
@@ -84,7 +94,10 @@ fi
 
 # path for R outputs
 R_TRACEBACK_PATH="$(mktemp).log"
-R_FRAMES_PATH="$(mktemp).rds"
+
+if [ -z "${R_FRAMES_PATH}" ]; then
+	R_FRAMES_PATH="$(mktemp).rds"
+fi
 
 # write R script
 R_SCRIPT_PATH="$(mktemp).R"
