@@ -108,6 +108,35 @@ EOF
 
 run-lldb () {
 
+	# write script
+	SCRIPT_PATH=$(mktemp)
+	cat > "${SCRIPT_PATH}" <<- EOF
+
+	# disable interrupts
+	call int \$interrupts = R_interrupts_suspended
+	call R_interrupts_suspended = (Rboolean) 1
+
+	# disable debugger
+	call int \$debug = RDEBUG(R_GlobalEnv)
+	call SET_RDEBUG(R_GlobalEnv, 0)
+
+	# disable garbage collector
+	call int \$gc = R_GCEnabled
+	call R_GCEnabled = 0
+
+	# source script
+	call Rf_eval(Rf_lang3(Rf_install("sys.source"), Rf_mkString("${R_SCRIPT_PATH}"), Rf_lang1(Rf_install("new.env"))), R_GlobalEnv)
+
+	# restore debugger
+	call SET_RDEBUG(R_GlobalEnv, \$debug)
+
+	# restore interrupts
+	call R_interrupts_suspended = (Rboolean) \$interrupts
+
+	# restore garbage collection
+	call R_GCEnabled = \$gc
+	EOF
+
 	printf "%s" "Attaching debugger ... "
 	"${LOUPE_DEBUGGER}" --batch --attach-pid "${PID}" --source "${SCRIPT_PATH}" > /dev/null
 	STATUS="$?"
@@ -121,6 +150,35 @@ run-lldb () {
 }
 
 run-gdb () {
+
+	# write script
+	SCRIPT_PATH=$(mktemp)
+	cat > "${SCRIPT_PATH}" <<- EOF
+	
+	# disable interrupts
+	call \$interrupts = R_interrupts_suspended
+	call R_interrupts_suspended = (Rboolean) 1
+
+	# disable debugger
+	call \$debug = RDEBUG(R_GlobalEnv)
+	call SET_RDEBUG(R_GlobalEnv, 0)
+
+	# disable garbage collector
+	call \$gc = R_GCEnabled
+	call R_GCEnabled = 0
+
+	# source script
+	call Rf_eval(Rf_lang3(Rf_install("sys.source"), Rf_mkString("${R_SCRIPT_PATH}"), Rf_lang1(Rf_install("new.env"))), R_GlobalEnv)
+
+	# restore debugger
+	call SET_RDEBUG(R_GlobalEnv, \$debug)
+
+	# restore interrupts
+	call R_interrupts_suspended = (Rboolean) \$interrupts
+
+	# restore garbage collection
+	call R_GCEnabled = \$gc
+	EOF
 
 	printf "%s" "Attaching debugger ... "
 
@@ -138,12 +196,6 @@ run-gdb () {
 
 }
 
-# write script
-SCRIPT_PATH=$(mktemp)
-cat > "${SCRIPT_PATH}" <<- EOF
-call Rf_eval(Rf_lang3(Rf_install("sys.source"), Rf_mkString("${R_SCRIPT_PATH}"), Rf_lang1(Rf_install("new.env"))), R_GlobalEnv)
-EOF
-
 case "${LOUPE_DEBUGGER}" in
 *gdb)  run-gdb  ;;
 *lldb) run-lldb ;;
@@ -160,3 +212,4 @@ if [ -f "${R_FRAMES_PATH}" ]; then
 	echo "R frames dumped to '${R_FRAMES_PATH}'."
 fi
 
+stty echo
