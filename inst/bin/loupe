@@ -81,12 +81,14 @@ fi
 # path for R outputs
 rtraceback=${rtraceback:-$(mktemp).log}
 rframes=${rframes:-$(mktemp).rds}
-renvir=R_GlobalEnv
+renvir="R_GlobalContext->cloenv == R_BaseEnv ? R_GlobalEnv : R_GlobalContext->cloenv"
 
 # if rexpr is still unset, use our default
 if [ -z "${rexpr}" ]; then
 
-	renvir="Rf_lang2(Rf_install(\"new.env\"), R_GlobalEnv)"
+	# evaluate in new environment, inheritting curent as parent
+	renvir="Rf_lang2(Rf_install(\"new.env\"), $renvir)"
+
 	read -r -d '' rexpr <<- EOF
 	# print rlang traceback if available
 	if ("rlang" %in% loadedNamespaces()) {
