@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 
-set +H
+# save stty in case things get changed by a tripped up debugger
+_stty=$(stty -g)
 
 read -r -d '' USAGE <<- EOF
-Usage: $(basename "$0") pid
+Usage: $(basename "$0") [-d debugger] [-e expr] [-f file] [-p pid] [-o output]
 
 Use a debugger to attach to an R process, and print the R call stack.
 
@@ -13,6 +14,7 @@ Options:
   -e    Run an R expression in the requested process.
   -f    Run an R script in the requested process.
   -o    The file where R frames should be saved.
+  -p    The process ID to attach to.
 
 EOF
 
@@ -29,30 +31,12 @@ while [ "$#" != "0" ]; do
 
 	case "$1" in
 
-	-d)
-		LOUPE_DEBUGGER="$2"
-		shift
-	;;
-
-	-e)
-		LOUPE_R_EXPRESSION="$2"
-		shift
-	;;
-
-	-f)
-		LOUPE_R_FILE="$2"
-		shift
-	;;
-
-	-o)
-		R_FRAMES_PATH=$(realpath "$2")
-		shift
-	;;
-
-	*)
-		PID="$1"
-		shift
-	;;
+	-d) debugger="$2";              shift ;;
+	-e) rexpr="$2";                 shift ;;
+	-f) rexpr="source(\"$2\")" ;    shift ;;
+	-o) rframes=$(realpath "$2") ;  shift ;;
+	-p) pid="$2" ;                  shift ;;
+	*)  pid="$1" ;
 
 	esac
 
@@ -61,31 +45,33 @@ while [ "$#" != "0" ]; do
 done
 
 # figure out debugger to be used
-if [ -z "${LOUPE_DEBUGGER}" ]; then
+if [ -z "${debugger}" ]; then
 	if [ "$(uname)" = "Darwin" ]; then
-		LOUPE_DEBUGGER=lldb
+		debugger=lldb
 	else
-		LOUPE_DEBUGGER=gdb
+		debugger=gdb
 	fi
 fi
 
-if ! command -v "${LOUPE_DEBUGGER}" &> /dev/null; then
-	echo "error: requested debugger '${LOUPE_DEBUGGER}' does not exist"
+if ! command -v "${debugger}" &> /dev/null; then
+	echo "error: requested debugger '${debugger}' does not exist"
 	exit 1
 fi
 
 # if we've been supplied the name of a process,
 # rather than a process id, then try to resolve it
-if ! [ "${PID}" -eq "${PID}" ] 2> /dev/null; then
+pid=${pid:-R}
+if ! [ "${pid}" -eq "${pid}" ] 2> /dev/null; then
 
-	_PID="$(pgrep -nx "${PID}")"
+	_pid="$(pgrep -nx "${pid}")"
 
-	if [ -z "${_PID}" ]; then
-		echo "error: could not resolve PID for process '${PID}'"
+	if [ -z "${_pid}" ]; then
+		echo "error: could not resolve pid for process '${pid}'"
 		exit 1
 	fi
 
-	PID="${_PID}"
+	echo "Found process ${pid} with PID ${_pid}"
+	pid="${_pid}"
 
 fi
 
@@ -93,136 +79,127 @@ fi
 # socket and keeping lldb and its connection alive for longer
 
 # path for R outputs
-R_TRACEBACK_PATH="$(mktemp).log"
+rtraceback=${rtraceback:-$(mktemp).log}
+rframes=${rframes:-$(mktemp).rds}
+renvir=R_GlobalEnv
 
-if [ -z "${R_FRAMES_PATH}" ]; then
-	R_FRAMES_PATH="$(mktemp).rds"
+# if rexpr is still unset, use our default
+if [ -z "${rexpr}" ]; then
+
+	renvir="Rf_lang2(Rf_install(\"new.env\"), R_GlobalEnv)"
+	read -r -d '' rexpr <<- EOF
+	# print rlang traceback if available
+	if ("rlang" %in% loadedNamespaces()) {
+		frames <- sys.frames()
+		if (length(frames) > 3L) {
+			bottom <- frames[[length(frames) - 3L]]
+			traceback <- format(rlang::trace_back(0, bottom))
+			writeLines(traceback, con = "${rtraceback}")
+		}
+	}
+	
+	# dump frames to file
+	status <- sys.status()
+
+	# trim off our frames
+	offset <- -4L
+	for (i in seq_along(status))
+		status[[i]] <- utils::head(status[[i]], n = offset)
+	
+	# save to file
+	saveRDS(status, file = "${rframes}", version = 2L)
+	EOF
+
 fi
 
 # write R script
-R_SCRIPT_PATH="$(mktemp).R"
-cat > "${R_SCRIPT_PATH}" <<- EOF
+rscript="$(mktemp).R"
+echo "${rexpr}" > "${rscript}"
 
-# print rlang traceback if available
-if ("rlang" %in% loadedNamespaces()) {
-	frames <- sys.frames()
-	if (length(frames) > 3L) {
-		bottom <- frames[[length(frames) - 3L]]
-		traceback <- format(rlang::trace_back(0, bottom))
-		writeLines(traceback, con = "${R_TRACEBACK_PATH}")
-	}
+lldb-only () {
+   case "${debugger}" in
+   *lldb) echo "$@" ;;
+   esac
 }
 
-# dump frames to file
-status <- sys.status()
-saveRDS(sys.status(), file = "${R_FRAMES_PATH}", version = 2L)
+# write debugger script
+dscript=$(mktemp)
+cat > "${dscript}" <<- EOF
 
+# disable interrupts
+call $(lldb-only int) \$interrupts = R_interrupts_suspended
+call R_interrupts_suspended = (Rboolean) 1
+
+# disable debugger
+call $(lldb-only int) \$globaldebug = RDEBUG(R_GlobalEnv)
+call SET_RDEBUG(R_GlobalEnv, 0)
+
+call $(lldb-only int) \$basedebug = RDEBUG(R_BaseEnv)
+call SET_RDEBUG(R_BaseEnv, 0)
+
+# disable garbage collector
+call $(lldb-only int) \$gc = R_GCEnabled
+call R_GCEnabled = 0
+
+# create path to script as string
+call $(lldb-only SEXP) \$script = Rf_protect(Rf_mkString("${rscript}"))
+
+# create call
+call $(lldb-only SEXP) \$call = Rf_protect(Rf_lang3(Rf_install("sys.source"), \$script, ${renvir}))
+
+# evaluate it
+call Rf_eval(\$call, R_BaseEnv)
+
+# unprotect protected objects
+call Rf_unprotect(2)
+
+# restore debugger
+call SET_RDEBUG(R_GlobalEnv, \$globaldebug)
+call SET_RDEBUG(R_BaseEnv, \$basedebug)
+
+# restore interrupts
+call R_interrupts_suspended = (Rboolean) \$interrupts
+
+# restore garbage collection
+call R_GCEnabled = \$gc
 EOF
 
-run-lldb () {
+doutput=$(mktemp)
 
-	# write script
-	SCRIPT_PATH=$(mktemp)
-	cat > "${SCRIPT_PATH}" <<- EOF
-
-	# disable interrupts
-	call int \$interrupts = R_interrupts_suspended
-	call R_interrupts_suspended = (Rboolean) 1
-
-	# disable debugger
-	call int \$debug = RDEBUG(R_GlobalEnv)
-	call SET_RDEBUG(R_GlobalEnv, 0)
-
-	# disable garbage collector
-	call int \$gc = R_GCEnabled
-	call R_GCEnabled = 0
-
-	# source script
-	call Rf_eval(Rf_lang3(Rf_install("sys.source"), Rf_mkString("${R_SCRIPT_PATH}"), Rf_lang1(Rf_install("new.env"))), R_GlobalEnv)
-
-	# restore debugger
-	call SET_RDEBUG(R_GlobalEnv, \$debug)
-
-	# restore interrupts
-	call R_interrupts_suspended = (Rboolean) \$interrupts
-
-	# restore garbage collection
-	call R_GCEnabled = \$gc
-	EOF
-
-	printf "%s" "Attaching debugger ... "
-	"${LOUPE_DEBUGGER}" --batch --attach-pid "${PID}" --source "${SCRIPT_PATH}" > /dev/null
-	STATUS="$?"
-	if [ "${STATUS}" != "0" ]; then
-		echo "ERROR: ${LOUPE_DEBUGGER} had status code ${STATUS}"
-		exit 1
-	fi
-
-	printf "%s\n" "Done!"
-
+lldb-command () {
+   "${debugger}" --batch --attach-pid "${pid}" --source "${dscript}" &> "${doutput}"
 }
 
-run-gdb () {
-
-	# write script
-	SCRIPT_PATH=$(mktemp)
-	cat > "${SCRIPT_PATH}" <<- EOF
-	
-	# disable interrupts
-	call \$interrupts = R_interrupts_suspended
-	call R_interrupts_suspended = (Rboolean) 1
-
-	# disable debugger
-	call \$debug = RDEBUG(R_GlobalEnv)
-	call SET_RDEBUG(R_GlobalEnv, 0)
-
-	# disable garbage collector
-	call \$gc = R_GCEnabled
-	call R_GCEnabled = 0
-
-	# source script
-	call Rf_eval(Rf_lang3(Rf_install("sys.source"), Rf_mkString("${R_SCRIPT_PATH}"), Rf_lang1(Rf_install("new.env"))), R_GlobalEnv)
-
-	# restore debugger
-	call SET_RDEBUG(R_GlobalEnv, \$debug)
-
-	# restore interrupts
-	call R_interrupts_suspended = (Rboolean) \$interrupts
-
-	# restore garbage collection
-	call R_GCEnabled = \$gc
-	EOF
-
-	printf "%s" "Attaching debugger ... "
-
-	LOUPE_DEBUGGER_OUTPUT=$(mktemp)
-	"${LOUPE_DEBUGGER}" -batch -p "${PID}" -x "${SCRIPT_PATH}" &> "${LOUPE_DEBUGGER_OUTPUT}"
-	STATUS="$?"
-	if [ "${STATUS}" != "0" ]; then
-		cat "${LOUPE_DEBUGGER_OUTPUT}"
-		echo "ERROR: ${LOUPE_DEBUGGER} had status code ${STATUS}"
-		exit 1
-	fi
-
-	rm -f -- "${LOUPE_DEBUGGER_OUTPUT}"
-	printf "%s\n" "Done!"
-
+gdb-command () {
+   "${debugger}" -batch -p "${pid}" -x "${dscript}" &> "${doutput}"
 }
 
-case "${LOUPE_DEBUGGER}" in
-*gdb)  run-gdb  ;;
-*lldb) run-lldb ;;
+printf "%s" "Attaching debugger ... "
+
+case "${debugger}" in
+*gdb)  eval "$(gdb-command)";  ec=$? ;;
+*lldb) eval "$(lldb-command)"; ec=$? ;;
 esac
 
-if [ -f "${R_TRACEBACK_PATH}" ]; then
+if [ "${ec}" != "0" ]; then
+	cat "${doutput}"
+	echo "ERROR: ${debugger} had status code ${ec}"
+	exit 1
+fi
+
+printf "%s\n" "Done!"
+
+if [ -f "${rtraceback}" ]; then
 	echo ""
 	echo -e "\033[1m\033[34m==>\033[0m \033[1mTraceback (most recent calls last)\033[0m"
-	cat "${R_TRACEBACK_PATH}"
+	cat "${rtraceback}"
 	echo ""
 fi
 
-if [ -f "${R_FRAMES_PATH}" ]; then
-	echo "R frames dumped to '${R_FRAMES_PATH}'."
+if [ -f "${rframes}" ]; then
+	echo "R frames dumped to '${rframes}'."
 fi
 
-stty echo
+# restore stty settings
+stty "${_stty}"
+
